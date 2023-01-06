@@ -4,8 +4,8 @@ import { Readable } from 'stream';
 import { IRange } from 'data-pieces';
 import { ConsoleBackend, Logger } from 'clui-logger';
 import { TIMESTAMP_SHORT } from 'clui-logger/lib/Backends/ConsoleBackend';
-import { MemoryRAS, RandomAccessStorage } from './RandomAccessStorage';
-import { ReplicatedResource } from './ReplicatedResource';
+import { MemoryRAS } from './RandomAccessStorage';
+import { InputTransmission, OutputTransmission, ReplicatedResource, TransmissionKind } from './ReplicatedResource';
 
 // Configure Logger (can be enabled in the tests to aid debugging)
 const logger = new Logger(new ConsoleBackend(TIMESTAMP_SHORT));
@@ -42,12 +42,31 @@ test('ReplicatedResource', t => {
         t.test('single output stream for complete content', async t => {
             const ras = new MemoryRAS();
 
-            const resource = makeResource(makeBufferArray(source, [5, 5, 10, 3, 6]), ras, 5);
+            // Prepare the readable stream
+            const streamFactoryFirst = (range?: IRange) => {
+                const { readable, push, end } = makeMockStream(source);
+
+                // Mock the stream stub method
+                const readStub = sinon.stub(readable, '_read');
+                readStub.onCall(0).callsFake(_ => push(5));
+                readStub.onCall(1).callsFake(_ => push(5));
+                readStub.onCall(2).callsFake(_ => push(10));
+                readStub.onCall(3).callsFake(_ => push(3));
+                readStub.onCall(4).callsFake(_ => push(6));
+                readStub.onCall(5).callsFake(_ => end());
+
+                return readable;
+            };
+
+            const streamFactory = sinon.stub<[IRange], Readable>();
+            streamFactory.onCall(0).callsFake(streamFactoryFirst);
+
+            const resource = new ReplicatedResource(streamFactory, () => ras, 29, 5);
             // resource.logger = logger;
 
             const stream = resource.createReadableStream();
 
-            const streamResult = (await drainStream(stream)).toString('utf8');
+            const streamResult = await drainStream(stream, 'utf8');
             t.equals(streamResult, source, "Stream result should be equal to source string");
 
             const cacheResult = ras.buffer.toString('utf8');
@@ -59,18 +78,12 @@ test('ReplicatedResource', t => {
 
             // Prepare the readable stream
             const streamFactoryFirst = (range?: IRange) => {
-                const readable = new Readable();
-
-                // Useful mock methods
-                const push = (start: number, length: number) => {
-                    readable.push(Buffer.from(source.substring(start, start + length), 'utf8'));
-                };
-                const end = () => readable.push(null);
+                const { readable, push } = makeMockStream(source);
 
                 // Mock the stream stub method
                 const readStub = sinon.stub(readable, '_read');
-                readStub.onCall(0).callsFake(_ => push(0, 5));
-                readStub.onCall(1).callsFake(_ => push(5, 5));
+                readStub.onCall(0).callsFake(_ => push(5));
+                readStub.onCall(1).callsFake(_ => push(5));
                 readStub.onCall(2).callsFake(_ => { });
 
                 return readable;
@@ -87,7 +100,7 @@ test('ReplicatedResource', t => {
             // Get the first 10 bytes from the string
             const expected = Buffer.from(source).subarray(0, 10).toString('utf8');
 
-            const streamResult = (await drainStream(stream)).toString('utf8');
+            const streamResult = await drainStream(stream, 'utf8');
             t.equals(streamResult, expected, "Stream result should be equal to source string");
 
             const cacheResult = ras.buffer.toString('utf8');
@@ -102,19 +115,14 @@ test('ReplicatedResource', t => {
 
             // Prepare the readable stream
             const streamFactoryFirst = (range?: IRange) => {
-                const readable = new Readable();
+                const { readable, push } = makeMockStream(source);
 
-                // Useful mock methods
-                const push = (start: number, length: number) => {
-                    readable.push(Buffer.from(source.substring(start, start + length), 'utf8'));
-                };
-                const end = () => readable.push(null);
-
-                // Mock the stream stub method
+                // Mock the stream read method
                 const readStub = sinon.stub(readable, '_read');
-                readStub.onCall(0).callsFake(_ => push(0, 3));
-                readStub.onCall(1).callsFake(_ => push(3, 3));
-                readStub.onCall(2).callsFake(_ => push(6, 4));
+                readStub.onCall(0).callsFake(_ => push(3));
+                readStub.onCall(1).callsFake(_ => push(3));
+                readStub.onCall(2).callsFake(_ => push(4));
+                // Stall the mock source stream
                 readStub.onCall(3).callsFake(_ => { });
 
                 return readable;
@@ -130,7 +138,7 @@ test('ReplicatedResource', t => {
 
             // Get the first 10 bytes from the string
             const expectedStream = Buffer.from(source).subarray(3, 9).toString('utf8');
-            const streamResult = (await drainStream(stream)).toString('utf8');
+            const streamResult = await drainStream(stream, 'utf8');
             t.equals(streamResult, expectedStream, "Stream result should be equal to source string");
 
             const expectedCache = Buffer.from(source).subarray(0, 10).toString('utf8');
@@ -162,19 +170,13 @@ test('ReplicatedResource', t => {
 
             // Prepare the readable stream
             const streamFactoryFirst = (range?: IRange) => {
-                const readable = new Readable();
+                const { readable, push, end } = makeMockStream(source);
 
-                // Useful mock methods
-                const push = (start: number, length: number) => {
-                    readable.push(Buffer.from(source.substring(start, start + length), 'utf8'));
-                };
-                const end = () => readable.push(null);
-
-                // Mock the stream stub method
+                // Mock the stream read method
                 const readStub = sinon.stub(readable, '_read');
-                readStub.onCall(0).callsFake(_ => push(0, 5));
-                readStub.onCall(1).callsFake(_ => push(5, 6));
-                readStub.onCall(2).callsFake(_ => push(11, 3));
+                readStub.onCall(0).callsFake(_ => push(5));
+                readStub.onCall(1).callsFake(_ => push(6));
+                readStub.onCall(2).callsFake(_ => push(3));
                 readStub.onCall(3).callsFake(_ => end());
 
                 return readable;
@@ -191,7 +193,7 @@ test('ReplicatedResource', t => {
             // Get the first 14 bytes from the string
             const expected = Buffer.from(source).subarray(0, 14).toString('utf8');
 
-            const streamResult = (await drainStream(stream)).toString('utf8');
+            const streamResult = await drainStream(stream, 'utf8');
             t.equals(streamResult, expected, "Stream result should be equal to source string");
 
             const cacheResult = ras.buffer.toString('utf8');
@@ -199,50 +201,96 @@ test('ReplicatedResource', t => {
 
             t.equals(streamFactory.getCall(0).returnValue.destroyed, true, "readable should have been destroyed");
         });
+
+        t.test('two output transmissions sharing the same input transmission', async t => {
+            // This test simulates two output transmissions that overlap at the start,
+            // and as such share the same input transmission for a while. After the input
+            // transmission ends, a new one is created just for the second output
+
+            const ras = new MemoryRAS();
+
+            // Prepare the readable stream
+            const streamFactoryFirst = (range?: IRange) => {
+                const { readable, push, end } = makeMockStream(source);
+
+                // Mock the stream read method
+                const readStub = sinon.stub(readable, '_read');
+                readStub.onCall(0).callsFake(_ => push(10));
+                readStub.onCall(1).callsFake(_ => end());
+
+                return readable;
+            };
+            const streamFactorySecond = (range?: IRange) => {
+                const { readable, skip, push, end } = makeMockStream(source);
+
+                skip(10);
+
+                // Mock the stream read method
+                const readStub = sinon.stub(readable, '_read');
+                readStub.onCall(0).callsFake(_ => push(5));
+                readStub.onCall(1).callsFake(_ => end());
+
+                return readable;
+            };
+
+            const streamFactory = sinon.stub<[IRange], Readable>();
+            streamFactory.onCall(0).callsFake(streamFactoryFirst);
+            streamFactory.onCall(1).callsFake(streamFactorySecond);
+
+            const resource = new ReplicatedResource(streamFactory, () => ras, 15, 5);
+            // resource.logger = logger;
+
+            const stream1 = resource.createReadableStream({ start: 0, end: 9 });
+            const stream2 = resource.createReadableStream({ start: 0, end: 15 });
+
+            const outputTransmissions = Array.from(resource.activeTransmissions)
+                .filter(tr => tr.kind === TransmissionKind.Output) as OutputTransmission[];
+
+            const inputTransmissions = Array.from(resource.activeTransmissions)
+                .filter(tr => tr.kind === TransmissionKind.Input) as InputTransmission[];
+
+            t.equals(outputTransmissions.length, 2, "should have two output transmissions");
+            t.equals(inputTransmissions.length, 1, "should have one input transmission");
+            t.notLooseEqual(outputTransmissions[0].dependency, null, "both outputs should depend on the same input");
+            t.notLooseEqual(outputTransmissions[1].dependency, null, "both outputs should depend on the same input");
+            t.strictEquals(outputTransmissions[0].dependency, outputTransmissions[1].dependency, "both outputs should depend on the same input");
+
+            const stream1Result = await drainStream(stream1, 'utf8');
+            const stream2Result = await drainStream(stream2, 'utf8');
+
+            const expected1 = Buffer.from(source).subarray(0, 9).toString('utf8');
+            t.equals(stream1Result, expected1, "Stream 1 result should be equal to source string");
+
+            const expected2 = Buffer.from(source).subarray(0, 15).toString('utf8');
+            t.equals(stream2Result, expected2, "Stream 2 result should be equal to source string");
+
+            t.equals(streamFactory.callCount, 2, "should have callend source stream factory twice");
+            t.deepLooseEqual(streamFactory.getCall(0).args[0], { start: 0, end: 10 }, "first stream should have byte range 0-10");
+            t.deepLooseEqual(streamFactory.getCall(1).args[0], { start: 10, end: 15 }, "second stream should have byte range 10-15");
+        });
     });
 });
 
-function makeBuffer (size: number, content: string = 'A'): Buffer {
-    return Buffer.alloc(size, content, 'utf8');
-}
-
-function makeBufferArray (source: string, lengths: number[]) {
-    const totalSize = lengths.reduce((a, b) => a + b, 0);
-
-    if (source.length < totalSize) {
-        throw new Error(`Buffer total lengths of ${totalSize} are greater than the source length of ${source.length}`);
-    }
-
-    const buffers: Buffer[] = [];
-
-    for (const length of lengths) {
-        buffers.push(Buffer.from(source.substring(0, length)));
-
-        source = source.substring(length);
-    }
-
-    return buffers;
-}
-
-function makeStream (buffers: Buffer[]) {
+function makeMockStream (source: string) {
     const readable = new Readable();
-    readable._read = () => { }; // _read is required but you can noop it
-    for (const buffer of buffers) {
-        readable.push(buffer);
-    }
-    readable.push(null);
-    return readable;
-}
 
-function makeResource (buffers: Buffer[], ras: RandomAccessStorage, pieceSize: number) {
-    const totalSize = buffers.map(buf => buf.byteLength).reduce((a, b) => a + b, 0);
+    let pushedCount: number = 0;
 
-    // TODO Handle the range parameter
-    const resource = new ReplicatedResource(
-        range => makeStream(buffers), () => ras, totalSize, pieceSize
-    );
+    const sourceBuffer = Buffer.from(source, 'utf8');
 
-    return resource;
+    const skip = (length: number) => {
+        pushedCount += length;
+    };
+    const pushRange = (start: number, length: number) => {
+        readable.push(Buffer.from(source.substring(start, start + length), 'utf8'));
+    };
+    const push = (length: number) => {
+        readable.push(sourceBuffer.subarray(pushedCount, pushedCount + length));
+        pushedCount += length;
+    };
+    const end = () => readable.push(null);
+
+    return { readable, skip, pushRange, push, end };
 }
 
 function makeDummyResource (totalSize: number, pieceSize: number) {
@@ -251,12 +299,18 @@ function makeDummyResource (totalSize: number, pieceSize: number) {
     return resource;
 }
 
-function drainStream (stream: Readable): Promise<Buffer> {
-    return new Promise<Buffer>((resolve, reject) => {
+function drainStream (stream: Readable): Promise<Buffer>;
+function drainStream (stream: Readable, encoding: BufferEncoding): Promise<string>;
+function drainStream (stream: Readable, encoding: BufferEncoding | null = null): Promise<Buffer | string> {
+    return new Promise<Buffer | string>((resolve, reject) => {
         const chunks: Buffer[] = [];
 
         stream.on('data', chunk => chunks.push(chunk));
         stream.on('error', err => reject(err));
-        stream.on('end', () => resolve(Buffer.concat(chunks)));
+        if (encoding == null) {
+            stream.on('end', () => resolve(Buffer.concat(chunks)));
+        } else {
+            stream.on('end', () => resolve(Buffer.concat(chunks).toString(encoding)));
+        }
     });
 }

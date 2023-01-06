@@ -1,6 +1,5 @@
 import { Readable, ReadableOptions, Transform, TransformCallback, TransformOptions } from 'stream';
 import { PiecesSet, IRange } from 'data-pieces';
-import * as fs from 'fs/promises';
 import { RandomAccessStorage } from './RandomAccessStorage';
 import { Semaphore } from 'data-semaphore';
 import { LoggerInterface } from 'clui-logger';
@@ -31,11 +30,11 @@ export abstract class AbstractReplicatedResource {
 
     public readonly pieces: PiecesSet;
 
-    protected defaultMinimumLag: number = 10;
+    public defaultMinimumLag: number = 10;
 
-    protected activeTransmissions: Set<Transmission>;
+    public activeTransmissions: Set<Transmission>;
 
-    protected cacheStream: RandomAccessStorage | null = null;
+    public cacheStream: RandomAccessStorage | null = null;
 
     protected get exposed (): ExposedReplicatedResource {
         return {
@@ -53,7 +52,9 @@ export abstract class AbstractReplicatedResource {
     public constructor (totalSize: number, pieceSize: number) {
         this.totalSize = totalSize;
         this.pieceSize = pieceSize;
-        this.lastPieceSize = this.totalSize % this.pieceSize;
+        this.lastPieceSize = this.totalSize % this.pieceSize == 0
+            ? this.pieceSize
+            : this.totalSize % this.pieceSize;
         this.piecesCount = Math.ceil(this.totalSize / this.pieceSize);
         this.pieces = new PiecesSet(this.piecesCount);
         this.activeTransmissions = new Set();
@@ -195,6 +196,11 @@ export abstract class AbstractReplicatedResource {
         this.logger?.debug(`Creating input transmission ${transmission.id} (range = [${piecesRange.start}, ${piecesRange.end}]).`);
 
         const stream = this.createSourceStream(bytesRange);
+
+        if (stream == null) {
+            throw new Error(`Create source stream function return null.`);
+        }
+
         stream.on('data', buffer => this.onReceiveInputBuffer(transmission, buffer));
         stream.on('error', err => this.closeActiveTransmission(transmission, err));
         stream.on('close', () => this.closeActiveTransmission(transmission));
@@ -234,6 +240,8 @@ export abstract class AbstractReplicatedResource {
         const [skip, take] = this.getPieceTrimOffsets(bytesRange);
 
         if (skip != null || take != null) {
+            this.logger?.debug(`Creating trimmed stream with skip ${skip}, take ${take} for transmission ${transmission.id}.`);
+
             transmission.trimmedStream = transmission.stream
                 .pipe(new SkipTakeTransformStream(skip, take));
         } else {
@@ -303,7 +311,11 @@ export abstract class AbstractReplicatedResource {
             await transmission.lock.use(() => { });
         }
 
-        this.logger?.debug(`Closing transmission ${transmission.id}.`);
+        if (error != null) {
+            this.logger?.debug(`Closing transmission ${transmission.id} with error ${error.message}.`);
+        } else {
+            this.logger?.debug(`Closing transmission ${transmission.id} with no error.`);
+        }
 
         // Mark the transmission as closed to avoid running this code twice for the same one
         transmission.closed = true;
@@ -434,6 +446,10 @@ export abstract class AbstractReplicatedResource {
 
         // Read to the pre-allocated buffer
         const bytesWritten = await writer?.write(position, data);
+
+        this.logger?.debug(`Writing piece ${piece} to cache in position ${position}, length ${bytesWritten} (out of ${data.byteLength})`);
+
+        return bytesWritten;
     }
 
     protected async readFromCache (piece: number): Promise<Buffer> {
@@ -448,6 +464,8 @@ export abstract class AbstractReplicatedResource {
 
         // Read to the pre-allocated buffer
         const bytesRead = await reader?.read(position, buffer);
+
+        this.logger?.debug(`Reading piece ${piece} from cache in position ${position}, length ${bytesRead}`);
 
         // Return the buffer. If we did not read enough to fill the buffer,
         // return just the slice that was read from it
@@ -627,14 +645,14 @@ export class ReplicatedResource extends AbstractReplicatedResource {
 export type CreateSourceStreamCallback = (range: IRange) => Readable;
 export type CreateCachedStreamCallback = () => RandomAccessStorage;
 
-enum TransmissionKind {
+export enum TransmissionKind {
     // Input transmissions are reading from the source and writing it directly to the cache
     Input = 'input',
     // Output transmissions are reading from the cache and and serving to the client
     Output = 'output',
 }
 
-interface BaseTransmission {
+export interface BaseTransmission {
     id: string;
     kind: TransmissionKind;
     range: IRange;
@@ -644,7 +662,7 @@ interface BaseTransmission {
     error: Error | null;
 }
 
-interface InputTransmission extends BaseTransmission {
+export interface InputTransmission extends BaseTransmission {
     kind: TransmissionKind.Input;
     stream: Readable;
     pieceBuffer: Buffer;
@@ -653,7 +671,7 @@ interface InputTransmission extends BaseTransmission {
     dependants: Set<OutputTransmission>;
 }
 
-interface OutputTransmission extends BaseTransmission {
+export interface OutputTransmission extends BaseTransmission {
     kind: TransmissionKind.Output;
     // The stream into which the raw piece chunks are pushed into
     stream: Readable;
@@ -673,7 +691,7 @@ interface OutputTransmission extends BaseTransmission {
     dependency: InputTransmission | null;
 }
 
-type Transmission = InputTransmission | OutputTransmission;
+export type Transmission = InputTransmission | OutputTransmission;
 
 interface ExposedReplicatedResource {
     readonly totalSize: number;
@@ -727,6 +745,7 @@ class OutputTransmissionStream extends Readable {
             this.resource.logger?.debug(`Reading piece ${piece} for output transmission ${this.transmission.id} stream`);
             this.resource.readFromCache(piece)
                 .then(buffer => {
+                    this.resource.logger?.debug(`Piece length: ${buffer.byteLength}`);
                     this.transmission.piecesCursor += 1;
                     this.push(buffer);
                 })
@@ -841,5 +860,3 @@ function rangeToClosed (range: IRange): IRange {
         end: range.end - 1
     };
 }
-
-new AbstractReplicatedResource();
